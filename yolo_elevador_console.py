@@ -1,26 +1,22 @@
-import time
 import cv2
+import time
 from ultralytics import YOLO
 
 # -------------------------------------------------------
 # CONFIGURACIÓN GENERAL
 # -------------------------------------------------------
 
-CAM_INDEX = 0          # índice de cámara (ajusta si hace falta)
-CONF_THRES = 0.5       # umbral de confianza mínimo
-MODEL_PATH = "yolov8n.pt"
+CAM_INDEX = 0
+CONF_THRES = 0.5
+DECISION_INTERVAL = 5.0   # segundos entre decisiones
+
+model = YOLO("yolov8n.pt")
 
 # -------------------------------------------------------
 # Lógica del elevador
 # -------------------------------------------------------
 
-def decidir_accion(num_personas: int) -> str:
-    """
-    Lógica:
-      - 0 personas  -> ABRIR puerta y NO subir.
-      - 1 a 3 pers. -> CERRAR puerta y SUBIR.
-      - >3 personas -> NO cerrar, NO subir.
-    """
+def decidir_accion(num_personas):
     if num_personas == 0:
         return "abrir_no_subir"
     elif 1 <= num_personas <= 3:
@@ -28,12 +24,11 @@ def decidir_accion(num_personas: int) -> str:
     else:
         return "no_cerrar_no_subir"
 
-
 # -------------------------------------------------------
-# Procesado de un frame (sin imshow)
+# Procesar frame
 # -------------------------------------------------------
 
-def procesar_frame(frame, model):
+def procesar_frame(frame):
     results = model(frame, verbose=False)
     r = results[0]
 
@@ -48,81 +43,88 @@ def procesar_frame(frame, model):
             cls_id = int(cls.item())
             conf_val = float(conf.item())
 
-            # COCO: clase 0 = persona
             if cls_id == 0 and conf_val >= CONF_THRES:
                 num_personas += 1
+                x1, y1, x2, y2 = box.int().tolist()
 
-    accion = decidir_accion(num_personas)
-    return num_personas, accion
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0,255,0), 2)
+                cv2.putText(frame, f"person {conf_val:.2f}",
+                            (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, (0,255,0), 1)
 
+    return num_personas
 
 # -------------------------------------------------------
-# Main: detección continua sin ventanas
+# Main loop: decisión automática cada 5s
 # -------------------------------------------------------
 
 def main():
-    print("===========================================")
-    print("  SISTEMA ELEVADOR - YOLO (modo consola)")
-    print("===========================================")
-    print("Reglas:")
-    print("  - 0 personas   -> ABRIR puerta, NO subir")
-    print("  - 1 a 3 pers.  -> CERRAR puerta y SUBIR")
-    print("  - >3 personas  -> NO cerrar, NO subir")
-    print("-------------------------------------------")
-    print("Controles:")
-    print("  - CTRL + C para detener la ejecución")
-    print("===========================================")
-
-    print("[INFO] Cargando modelo YOLO...")
-    model = YOLO(MODEL_PATH)
-    print("[INFO] Modelo cargado.")
-
     cap = cv2.VideoCapture(CAM_INDEX)
+
     if not cap.isOpened():
-        print(f"[ERROR] No se pudo abrir la cámara con índice {CAM_INDEX}.")
+        print(f"No se pudo abrir la cámara con índice {CAM_INDEX}")
         return
 
-    ultima_accion = None
-    ultimo_num = None
-    t_ultimo_print = 0.0
+    print("YOLO elevador:")
+    print(" - Decisiones automáticas cada 5 segundos")
+    print(" - ESC para salir")
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("[ERROR] No se pudo leer frame de la cámara.")
-                break
+    cv2.namedWindow("Elevador YOLO")
 
-            num_personas, accion = procesar_frame(frame, model)
+    last_decision_time = time.time()
+    last_action = "N/A"
+    last_count = 0
 
-            # Solo imprimir si cambió algo o cada cierto tiempo
-            ahora = time.time()
-            if (num_personas != ultimo_num) or (accion != ultima_accion) or (ahora - t_ultimo_print > 3.0):
-                print("-------------------------------------------")
-                print(f"Personas detectadas: {num_personas}")
-                if accion == "abrir_no_subir":
-                    print("ACCIÓN: ABRIR puerta, NO subir.")
-                    # Aquí iría la señal al actuador para abrir puerta
-                elif accion == "cerrar_subir":
-                    print("ACCIÓN: CERRAR puerta y SUBIR elevador.")
-                    # Aquí iría la señal al actuador para cerrar y subir
-                else:
-                    print("ACCIÓN: NO cerrar puerta, NO subir (sobreocupado).")
-                    # Aquí iría la lógica de bloqueo del elevador
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("No se pudo leer frame")
+            break
 
-                ultima_accion = accion
-                ultimo_num = num_personas
-                t_ultimo_print = ahora
+        # Procesar detección
+        num_personas = procesar_frame(frame)
 
-            # Pequeño sleep para no saturar CPU
-            time.sleep(0.1)
+        # Tomar decisión cada DECISION_INTERVAL
+        now = time.time()
+        if now - last_decision_time >= DECISION_INTERVAL:
+            last_action = decidir_accion(num_personas)
+            last_count = num_personas
 
-    except KeyboardInterrupt:
-        print("\n[INFO] Interrupción por usuario (CTRL+C). Saliendo...")
+            print("-------------------------------------")
+            print(f"Personas detectadas: {num_personas}")
+            print(f"Acción: {last_action}")
 
-    finally:
-        cap.release()
+            last_decision_time = now
 
+        # Mostrar info en la ventana
+        cv2.putText(frame,
+                    f"Personas (ahora): {num_personas}",
+                    (10, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, (255,255,255), 2)
+
+        cv2.putText(frame,
+                    f"Ultima accion: {last_action}",
+                    (10, 55),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7, (0,255,255), 2)
+
+        cv2.putText(frame,
+                    f"Siguiente decision en: {int(DECISION_INTERVAL - (now - last_decision_time))}s",
+                    (10, 85),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0,255,0), 2)
+
+        cv2.imshow("Elevador YOLO", frame)
+
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:  # ESC
+            print("Saliendo...")
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
